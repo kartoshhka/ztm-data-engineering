@@ -1,46 +1,50 @@
+%pip install transformers
+%pip install sentence-transformers
 %pip install outlines
+%pip install torch
+
 
 from huggingface_hub import login
 
 login(token="hf_...")
 
+
 import torch
 import json
 import outlines
+import transformers
 
-model_name = "mistralai/Mistral-7B-Instruct-v0.3"
+model_name = "microsoft/Phi-3-mini-4k-instruct"
 
-generator = outlines.models.transformers(
-    model_name,
-    device="cuda",
-    model_kwargs={
-        "torch_dtype": torch.float16,
-    }
+
+model = outlines.from_transformers(
+    transformers.AutoModelForCausalLM.from_pretrained(model_name),
+    transformers.AutoTokenizer.from_pretrained(model_name)
 )
 
-schema = json.dumps({
-    "type": "object",
-    "properties": {
-        "sentiment": {
-            "type": "string",
-            "enum": ["positive", "negative"]
-        }
-    },
-    "required": ["sentiment"]
-})
+%pip install pydantic
 
-generate_json = outlines.generate.json(generator, schema)
+import outlines
+from pydantic import BaseModel
+from enum import Enum
+
+class Sentiment(str, Enum):
+    positive = "positive"
+    negative = "negative"
+
+
+class Classification(BaseModel):
+    sentiment: Sentiment
+
+generator = outlines.Generator(model, Classification)
 
 def classify_review(review):
     prompt = (
-        "Classify the following customer review as positive or negative.\n\n"
+        "Classify the following customer review as positive or negative based on review content.\n\n"
         f"Review:\n{review}\n"
     )
-
-    output_json = generate_json(prompt, max_tokens=40)
-
+    output_json = generator(prompt)
     return output_json
-
 
 print(classify_review("This is absolutely delightful!"))
 
