@@ -2,15 +2,16 @@
 %pip install outlines
 
 # -----------------------
+# Databricks throws an error saying it already has spark runnig, don't know if it's true for all workspaces
 
-from pyspark.sql import SparkSession
+# from pyspark.sql import SparkSession
 
-spark = SparkSession.builder \
-    .appName("ReviewsClassifier") \
-    .master("local[*]") \
-    .getOrCreate()
+# spark = SparkSession.builder \
+#     .appName("ReviewsClassifier") \
+#     .master("local[*]") \
+#     .getOrCreate()
 
-spark
+# spark
 
 
 # ------------------------
@@ -26,58 +27,72 @@ df = spark.createDataFrame(
     reviews,
     ["review_id", "review"]
 )
-df.show()
+display(df)
 
 # ------------------------
+%pip install torch
 
-import outlines
-import json
 import torch
+import json
+import outlines
+import transformers
 
-model_name = "mistralai/Mistral-7B-Instruct-v0.3"
+model_name = "microsoft/Phi-3-mini-4k-instruct"
 
-schema = json.dumps({
-    "type": "object",
-    "properties": {
-        "sentiment": {
-            "type": "string",
-            "enum": ["positive", "negative"]
-        }
-    },
-    "required": ["sentiment"]
-})
 
-def classify(generate_json, review):
-    prompt = (
-        "Classify the following customer review as positive or negative.\n\n"
-        f"Review:\n{review}\n"
-    )
-    output_json = generate_json(prompt, max_tokens=40)
-    return output_json['sentiment']
+from huggingface_hub import login
+
+login(token="hf_...")
+
+model = outlines.from_transformers(
+    transformers.AutoModelForCausalLM.from_pretrained(model_name),
+    transformers.AutoTokenizer.from_pretrained(model_name)
+)
+
+
+# ------------------------------------------
+#Removed UDF approach since it was too slow and wouldn't work with a free workspace
+
+import torch
+import outlines
+import transformers
+from pydantic import BaseModel
+from enum import Enum
+from pyspark.sql import Row
+import json
+
+
+class Sentiment(str, Enum):
+    positive = "positive"
+    negative = "negative"
+
+class Classification(BaseModel):
+    sentiment: Sentiment
+
+generator = outlines.Generator(model, Classification)
+
+def classify_reviews(reviews):
+    results = []
+    for review in reviews:
+        prompt = (
+            "Classify the following customer review as positive or negative.\n\n"
+            f"Review:\n{review}\n"
+        )
+        output = generator(prompt)
+        parsed = json.loads(output)
+        results.append(parsed["sentiment"])
+    return results
 
 # ------------------------------------------
 
-from pyspark.sql.functions import udf
-from functools import cache
-from huggingface_hub import login
+rows = df.select("review_id", "review").collect()
 
-@udf("string")
-def sentiment_udf(review):
+reviews = [row["review"] for row in rows]
 
-    @cache
-    def get_generate_json():
-        login(token="hf_...")
-        generator = outlines.models.transformers(
-            model_name,
-            device="cuda",
-            model_kwargs={"torch_dtype": torch.float16},
-        )
-        return outlines.generate.json(generator, schema)
-    
-    generate_json = get_generate_json()
+sentiments = classify_reviews(reviews)
 
-    return classify(generate_json, review)
-
-
-result_df = df.withColumn("sentiment", sentiment_udf("review"))
-result_df.show(truncate=False)
+results_df = spark.createDataFrame(
+    [Row(review_id=row["review_id"], review=row["review"], sentiment=sent)
+     for row, sent in zip(rows, sentiments)]
+)
+display(results_df)
